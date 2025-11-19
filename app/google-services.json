@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "775125364088",
+    "firebase_url": "https://sensorhumo-15054-default-rtdb.firebaseio.com",
+    "project_id": "sensorhumo-15054",
+    "storage_bucket": "sensorhumo-15054.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:775125364088:android:329d36576b0cbb731e2c8d",
+        "android_client_info": {
+          "package_name": "com.example.sensorhumo_iot"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC3jc5OTAIPcZ5kCiYyP2KmiTwgXQymlA0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
