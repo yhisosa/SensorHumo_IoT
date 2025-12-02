@@ -1,17 +1,24 @@
 package com.example.sensorhumo_iot
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -24,13 +31,12 @@ import com.google.firebase.ktx.Firebase
 
 class MainActivity : ComponentActivity() {
 
-    // --- REFERENCIAS DE LÓGICA ---
     private lateinit var auth: FirebaseAuth
-    private lateinit var varDatabase: DatabaseReference // La hacemos var para poder reasignarla
+    private lateinit var varDatabase: DatabaseReference
     private lateinit var tcpManager: ComunicacionTCP
 
     // --- ESTADO DE LA UI ---
-    private val estadoConexion = mutableStateOf("Estado: Desconectado")
+    private val estadoConexion = mutableStateOf("Desconectado 🔴")
     private val lecturaHumo = mutableStateOf("---")
     private val usuarioLogueado = mutableStateOf(false)
 
@@ -38,69 +44,50 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // 1. INICIALIZACIÓN DE LÓGICA
         auth = Firebase.auth
-        // Inicialización temporal de la base de datos (se reasigna al loguear)
         varDatabase = FirebaseDatabase.getInstance().reference.child("temp")
         tcpManager = ComunicacionTCP(this)
 
-        // Comprobar si el usuario ya inició sesión (Persistencia)
         if (auth.currentUser != null) {
             usuarioLogueado.value = true
-            // Apuntamos la base de datos al nodo del usuario (Paso 6)
             varDatabase = FirebaseDatabase.getInstance().reference.child("datosUsuarios").child(auth.currentUser!!.uid)
+            sincronizarDatosLocales() // Intenta subir datos al iniciar (Paso 5)
         }
 
-        // 2. RENDERIZADO DE LA UI (COMPOSE)
         setContent {
             SensorHumo_IoTTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-
-                    // --- CONTROLADOR DE NAVEGACIÓN ---
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color(0xFF121212)
+                ) {
                     if (usuarioLogueado.value) {
                         PantallaPrincipal(
-                            modifier = Modifier.padding(innerPadding),
-                            estadoConexionActual = estadoConexion.value,
-                            lecturaHumoActual = lecturaHumo.value,
-                            onConectarClick = { ipPuerto ->
-                                val (ip, puerto) = parsearDireccion(ipPuerto)
-                                if (ip != null && puerto != null) {
-                                    estadoConexion.value = "Estado: Intentando conectar..."
-                                    tcpManager.conectar(ip, puerto)
+                            estadoConexion = estadoConexion.value,
+                            lecturaHumo = lecturaHumo.value,
+                            onConectar = { ip ->
+                                val (addr, port) = parsearDireccion(ip)
+                                if (addr != null && port != null) {
+                                    estadoConexion.value = "Conectando... 🟡"
+                                    tcpManager.conectar(addr, port)
                                 } else {
-                                    estadoConexion.value = "Error: Formato IP:Puerto incorrecto."
+                                    mostrarAlerta("IP Incorrecta. Ej: 192.168.1.15:8080")
                                 }
                             },
-                            onActivarClick = {
-                                tcpManager.enviarComando("RELAY_ON")
-                                guardarEnFirebase(RegistroHumo(
-                                    lecturaHumo = lecturaHumo.value.toIntOrNull() ?: 0,
-                                    evento = "CONTROL_RELAY_ON"
-                                ))
+                            onAccion = { cmd, log ->
+                                tcpManager.enviarComando(cmd)
+                                val valorHumo = lecturaHumo.value.toIntOrNull() ?: 0
+                                guardarDatos(RegistroHumo(lecturaHumo = valorHumo, evento = log))
                             },
-                            onSilenciarClick = {
-                                tcpManager.enviarComando("ALARM_OFF")
-                                guardarEnFirebase(RegistroHumo(
-                                    lecturaHumo = lecturaHumo.value.toIntOrNull() ?: 0,
-                                    evento = "CONTROL_ALARM_OFF"
-                                ))
-                            },
-                            // Lógica de cerrar sesión (solicitado)
-                            onCerrarSesionClick = {
+                            onSalir = {
                                 auth.signOut()
                                 usuarioLogueado.value = false
-                            }
+                            },
+                            onSincronizar = { sincronizarDatosLocales() } // Botón Sincronizar
                         )
                     } else {
-                        // Muestra la pantalla de Login/Registro
                         PantallaLogin(
-                            modifier = Modifier.padding(innerPadding),
-                            onLoginClick = { email, password ->
-                                iniciarSesion(email, password)
-                            },
-                            onRegisterClick = { email, password ->
-                                registrarUsuario(email, password)
-                            }
+                            onLogin = { e, p -> iniciarSesion(e, p) },
+                            onRegistro = { e, p -> registrarUsuario(e, p) }
                         )
                     }
                 }
@@ -108,250 +95,250 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- FUNCIONES DE AUTENTICACIÓN (Paso 6) ---
-    private fun registrarUsuario(email: String, pass: String) {
-        if (email.isBlank() || pass.isBlank()) {
-            Toast.makeText(baseContext, "Correo y contraseña no pueden estar vacíos.", Toast.LENGTH_SHORT).show()
+    // --- LÓGICA DE ALMACENAMIENTO OFFLINE (PASO 5) ---
+
+    private fun guardarDatos(registro: RegistroHumo) {
+        // Verifica la conexión antes de intentar subir
+        if (!hayInternet()) {
+            guardarLocalmente(registro)
+            return
+        }
+        guardarEnFirebase(registro)
+    }
+
+    private fun guardarEnFirebase(registro: RegistroHumo) {
+        // Intenta subir a Firebase
+        varDatabase.push().setValue(registro)
+            .addOnSuccessListener {
+                println("Firebase: Dato subido correctamente")
+            }
+            .addOnFailureListener {
+                // Si Firebase falla por un problema temporal o de red, guarda local
+                guardarLocalmente(registro)
+            }
+    }
+
+    private fun guardarLocalmente(registro: RegistroHumo) {
+        // Usamos SharedPreferences para guardar datos temporalmente
+        val sharedPref = getSharedPreferences(auth.currentUser?.uid ?: "TEMP_GUEST", Context.MODE_PRIVATE)
+        val editor = sharedPref.edit()
+
+        // Creamos un string simple para guardar: "valor|evento|timestamp"
+        val datoString = "${registro.lecturaHumo}|${registro.evento}|${registro.timestamp}"
+
+        // Usamos el timestamp como llave única
+        editor.putString(registro.timestamp.toString(), datoString)
+        editor.apply()
+
+        mostrarAlerta("⚠️ Sin Internet: Dato guardado en el teléfono")
+    }
+
+    private fun sincronizarDatosLocales() {
+        val sharedPref = getSharedPreferences(auth.currentUser?.uid ?: "TEMP_GUEST", Context.MODE_PRIVATE)
+        val todosLosDatos = sharedPref.all
+
+        if (todosLosDatos.isEmpty()) {
+            mostrarAlerta("✅ Todo sincronizado. No hay datos pendientes.")
             return
         }
 
-        auth.createUserWithEmailAndPassword(email, pass)
-            .addOnCompleteListener(this) { task ->
-                if (task.isSuccessful) {
-                    val user = task.result?.user
-                    if (user != null) {
-                        varDatabase = FirebaseDatabase.getInstance().reference.child("datosUsuarios").child(user.uid)
-                        usuarioLogueado.value = true
-                    } else {
-                        Toast.makeText(baseContext, "Fallo el registro: No se pudo obtener el usuario.", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    Toast.makeText(baseContext, "Fallo el registro: ${task.exception?.message}", Toast.LENGTH_SHORT).show()
+        if (!hayInternet()) {
+            mostrarAlerta("❌ No hay internet para sincronizar. Conéctate y vuelve a intentar.")
+            return
+        }
+
+        mostrarAlerta("🔄 Sincronizando ${todosLosDatos.size} datos pendientes...")
+
+        for ((key, value) in todosLosDatos) {
+            val datos = (value as String).split("|")
+            if (datos.size == 3) {
+                val registroRecuperado = RegistroHumo(
+                    lecturaHumo = datos[0].toInt(),
+                    evento = datos[1],
+                    timestamp = datos[2].toLong(),
+                    estado = "OFFLINE_SYNC"
+                )
+
+                // Subir a Firebase
+                varDatabase.push().setValue(registroRecuperado).addOnSuccessListener {
+                    // Si sube bien, borramos del teléfono
+                    val editor = sharedPref.edit()
+                    editor.remove(key)
+                    editor.apply()
                 }
             }
+        }
+    }
+
+    private fun hayInternet(): Boolean {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        // Verifica que la red tenga capacidades de internet
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    // --- REGISTRO Y LOGIN ---
+    private fun registrarUsuario(email: String, pass: String) {
+        if (email.isBlank() || pass.length < 6) { mostrarAlerta("Error: Datos inválidos"); return }
+        auth.createUserWithEmailAndPassword(email, pass).addOnCompleteListener(this) { task ->
+            if (task.isSuccessful) {
+                val user = task.result?.user
+                if (user != null) {
+                    varDatabase = FirebaseDatabase.getInstance().reference.child("datosUsuarios").child(user.uid)
+                    usuarioLogueado.value = true
+                    sincronizarDatosLocales()
+                }
+            } else mostrarAlerta("Fallo: ${task.exception?.message}")
+        }
     }
 
     private fun iniciarSesion(email: String, pass: String) {
-        auth.signInWithEmailAndPassword(email, pass)
-            .addOnCompleteListener(this) { task ->
-                if (task.isSuccessful) {
-                    val user = auth.currentUser
-                    if (user != null) {
-                        varDatabase = FirebaseDatabase.getInstance().reference.child("datosUsuarios").child(user.uid)
-                        usuarioLogueado.value = true
-                    }
-                } else {
-                    Toast.makeText(baseContext, "Fallo el inicio de sesión.", Toast.LENGTH_SHORT).show()
-                }
-            }
+        if (email.isBlank() || pass.isBlank()) return
+        auth.signInWithEmailAndPassword(email, pass).addOnCompleteListener(this) { task ->
+            if (task.isSuccessful && auth.currentUser != null) {
+                varDatabase = FirebaseDatabase.getInstance().reference.child("datosUsuarios").child(auth.currentUser!!.uid)
+                usuarioLogueado.value = true
+                sincronizarDatosLocales()
+            } else mostrarAlerta("Error al iniciar sesión")
+        }
     }
 
-    // --- FUNCIONES DE CALLBACK ---
+    // --- CALLBACKS Y UTILIDADES ---
+    fun actualizarEstadoConexion(estado: String) { estadoConexion.value = estado }
 
-    fun actualizarEstadoConexion(estado: String) {
-        estadoConexion.value = estado
+    fun actualizarUIyGuardar(dato: Int) {
+        lecturaHumo.value = dato.toString()
+        val evento = if (dato > 2000) "PELIGRO_HUMO" else "NORMAL"
+        guardarDatos(RegistroHumo(lecturaHumo = dato, evento = evento))
     }
 
-    fun actualizarUIyGuardar(datoReal: Int) {
-        lecturaHumo.value = datoReal.toString()
-
-        val evento = if (datoReal > 1000) "ALARMA_HUMO_ONLINE" else "LECTURA_NORMAL"
-        guardarEnFirebase(RegistroHumo(
-            lecturaHumo = datoReal,
-            evento = evento
-        ))
+    fun mostrarAlerta(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
-    fun mostrarAlertaHumo() {
-        Toast.makeText(this, "🚨 ¡ALARMA DE HUMO DETECTADA! 🚨", Toast.LENGTH_LONG).show()
-    }
+    fun activarModoOffline() { println("Conexión con ESP32 perdida.") }
 
-    fun activarModoOffline() {
-        // Rutina llamada al perder la conexión (Paso 5)
-        println("MODO OFFLINE ACTIVADO: Rutina de sincronización pendiente...")
-        // Aquí iría la lógica de SharedPreferences
-    }
-
-    // --- FUNCIONES INTERNAS ---
-    fun guardarEnFirebase(registro: RegistroHumo) {
-        // Guarda los datos DENTRO del nodo del usuario (Paso 5/Paso 6)
-        varDatabase.push().setValue(registro)
-            .addOnSuccessListener {
-                println("Registro subido a Firebase: ${registro.lecturaHumo}")
-            }
-            .addOnFailureListener {
-                println("Error al subir a Firebase: ${it.message}")
-                // Aquí iría la rutina para guardar en SharedPreferences
-            }
-    }
-
-    private fun parsearDireccion(ipPuerto: String): Pair<String?, Int?> {
+    private fun parsearDireccion(ip: String): Pair<String?, Int?> {
         return try {
-            val partes = ipPuerto.split(":")
-            if (partes.size == 2) {
-                Pair(partes[0], partes[1].toInt())
-            } else {
-                Pair(null, null)
-            }
-        } catch (e: Exception) {
-            Pair(null, null)
-        }
+            val p = ip.split(":")
+            if (p.size == 2) Pair(p[0], p[1].toInt()) else Pair(null, null)
+        } catch (e: Exception) { Pair(null, null) }
     }
 }
 
-
-// --- PANTALLA DE LOGIN (NUEVA) ---
+// --- PANTALLAS COMPOSABLES ---
 @Composable
-fun PantallaLogin(
-    modifier: Modifier = Modifier,
-    onLoginClick: (String, String) -> Unit,
-    onRegisterClick: (String, String) -> Unit
-) {
+fun PantallaLogin(onLogin: (String, String) -> Unit, onRegistro: (String, String) -> Unit) {
     var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "Sensor de Humo IoT - Acceso",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
+    Column(modifier = Modifier.fillMaxSize().padding(30.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("🔐", fontSize = 50.sp, color = Color.White)
+        Text("IoT Seguro", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Spacer(Modifier.height(30.dp))
 
-        OutlinedTextField(
-            value = email,
-            onValueChange = { email = it },
-            label = { Text("Correo Electrónico") },
-            modifier = Modifier.fillMaxWidth()
-        )
+        CampoTexto(email, "Correo") { email = it }
+        Spacer(Modifier.height(10.dp))
+        CampoTexto(pass, "Contraseña", true) { pass = it }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text("Contraseña") },
-            modifier = Modifier.fillMaxWidth(),
-            visualTransformation = PasswordVisualTransformation()
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Button(
-            onClick = { onLoginClick(email, password) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Iniciar Sesión")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Button(
-            onClick = { onRegisterClick(email, password) },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-        ) {
-            Text("Registrarse")
-        }
+        Spacer(Modifier.height(25.dp))
+        BotonBonito("Iniciar Sesión", Color(0xFF2196F3)) { onLogin(email, pass) }
+        Spacer(Modifier.height(10.dp))
+        BotonBonito("Registrarse", Color(0xFF4CAF50)) { onRegistro(email, pass) }
     }
 }
 
-
-// --- PANTALLA PRINCIPAL (Composable UI) ---
 @Composable
 fun PantallaPrincipal(
-    modifier: Modifier = Modifier,
-    estadoConexionActual: String,
-    lecturaHumoActual: String,
-    onConectarClick: (String) -> Unit,
-    onActivarClick: () -> Unit,
-    onSilenciarClick: () -> Unit,
-    onCerrarSesionClick: () -> Unit
+    estadoConexion: String,
+    lecturaHumo: String,
+    onConectar: (String) -> Unit,
+    onAccion: (String, String) -> Unit,
+    onSalir: () -> Unit,
+    onSincronizar: () -> Unit
 ) {
-    var ipPuerto by remember { mutableStateOf("192.168.1.15:8080") }
+    var ip by remember { mutableStateOf("172.20.10.3:8080") }
+    val nivelHumo = lecturaHumo.toIntOrNull() ?: 0
+    val colorEstado = when {
+        nivelHumo > 2000 -> Color(0xFFCF6679)
+        nivelHumo > 1000 -> Color(0xFFFFEB3B)
+        else -> Color(0xFF03DAC5)
+    }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "TI3042 - Sensor de Humo IoT",
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
+    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
 
-        OutlinedTextField(
-            value = ipPuerto,
-            onValueChange = { ipPuerto = it },
-            label = { Text("IP:Puerto del ESP32") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Button(
-            onClick = { onConectarClick(ipPuerto) },
-            modifier = Modifier.padding(top = 8.dp)
-        ) {
-            Text("Conectar")
+        // Tarjeta Conexión
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("📡 Control Panel", fontSize = 20.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                Text(estadoConexion, color = Color.Gray, fontSize = 14.sp)
+                Spacer(Modifier.height(10.dp))
+                CampoTexto(ip, "IP del ESP32") { ip = it }
+                Spacer(Modifier.height(10.dp))
+                BotonBonito("Conectar", Color(0xFF6200EE)) { onConectar(ip) }
+            }
         }
+        Spacer(Modifier.height(15.dp))
 
-        Text(
-            text = estadoConexionActual,
-            fontSize = 16.sp,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Text(
-            text = "Lectura del Sensor (Descifrado):",
-            fontSize = 18.sp
-        )
-
-        Text(
-            text = lecturaHumoActual,
-            fontSize = 48.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(
-            onClick = { onActivarClick() },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Activar Extractor (Relé ON)")
+        // Tarjeta Sensor
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Nivel de Humo", color = Color.White)
+                Text(text = lecturaHumo, fontSize = 50.sp, fontWeight = FontWeight.Bold, color = colorEstado)
+                Text(if (nivelHumo > 2000) "🔥 PELIGRO 🔥" else "✅ Normal", color = colorEstado)
+            }
         }
+        Spacer(Modifier.height(20.dp))
 
-        Button(
-            onClick = { onSilenciarClick() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-        ) {
-            Text("Silenciar Alarma (LED OFF)")
+        // Botones
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            BotonAccion("💨\nVentilación", Color(0xFF03A9F4)) { onAccion("RELAY_ON", "SISTEMA_ON") }
+            BotonAccion("🔕\nApagar", Color(0xFFFF5722)) { onAccion("ALARM_OFF", "SISTEMA_OFF") }
         }
+        Spacer(Modifier.height(20.dp))
 
-        Spacer(modifier = Modifier.weight(1f)) // Empuja el botón de cerrar sesión hacia abajo
+        // Botón de Sincronización Manual (Paso 5)
+        BotonBonito("🔄 Sincronizar Datos", Color(0xFF4CAF50)) { onSincronizar() }
 
-        Button(
-            onClick = { onCerrarSesionClick() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) // Color rojo
-        ) {
-            Text("Cerrar Sesión")
-        }
+        Spacer(Modifier.weight(1f))
+        BotonBonito("Cerrar Sesión", Color(0xFFB00020)) { onSalir() }
+    }
+}
+
+// --- COMPONENTES ---
+@Composable
+fun CampoTexto(valor: String, label: String, esPass: Boolean = false, onCambio: (String) -> Unit) {
+    OutlinedTextField(
+        value = valor,
+        onValueChange = onCambio,
+        label = { Text(label, color = Color.Gray) },
+        singleLine = true,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            focusedBorderColor = Color(0xFFBB86FC),
+            unfocusedBorderColor = Color.Gray
+        ),
+        visualTransformation = if (esPass) PasswordVisualTransformation() else VisualTransformation.None,
+        // *** ARREGLO FINAL: Usamos la ruta completa para evitar conflictos de imports ***
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+            keyboardType = if (esPass) androidx.compose.ui.text.input.KeyboardType.Password else androidx.compose.ui.text.input.KeyboardType.Text
+        ),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+@Composable
+fun BotonBonito(texto: String, color: Color, onClick: () -> Unit) {
+    Button(onClick = onClick, colors = ButtonDefaults.buttonColors(containerColor = color), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().height(50.dp)) {
+        Text(texto, fontSize = 16.sp, color = Color.White)
+    }
+}
+
+@Composable
+fun BotonAccion(texto: String, color: Color, onClick: () -> Unit) {
+    Button(onClick = onClick, colors = ButtonDefaults.buttonColors(containerColor = color), shape = RoundedCornerShape(12.dp), modifier = Modifier.size(130.dp, 80.dp)) {
+        Text(texto, textAlign = TextAlign.Center, fontSize = 14.sp, color = Color.Black)
     }
 }

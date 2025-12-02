@@ -6,7 +6,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.Socket
-import android.util.Log // Agregamos Log para el debugging
+import android.util.Log
 
 /**
  * Esta clase maneja la comunicación TCP/IP con el servidor ESP32.
@@ -41,14 +41,13 @@ class ComunicacionTCP(private val context: Context) {
     fun conectar(ip: String, puerto: Int) {
         scope.launch {
             try {
-                // Si ya estamos conectados, salimos
                 if (isConnected) return@launch
 
                 socket = Socket(ip, puerto)
                 output = PrintWriter(socket!!.getOutputStream(), true)
                 input = BufferedReader(InputStreamReader(socket!!.getInputStream()))
 
-                // 1. AUTENTICACIÓN (Paso 6: Enviar clave de seguridad)
+                // 1. AUTENTICACIÓN (Paso 6)
                 output!!.println(CLAVE_SEGURIDAD)
 
                 // 2. Leer la confirmación del ESP32
@@ -56,7 +55,7 @@ class ComunicacionTCP(private val context: Context) {
                 if (confirmacion == "OK_AUTH") {
                     isConnected = true
                     withContext(Dispatchers.Main) {
-                        mainActivity.actualizarEstadoConexion("Estado: CONECTADO y AUTENTICADO")
+                        mainActivity.actualizarEstadoConexion("Estado: CONECTADO y AUTENTICADO ✅")
                     }
                     iniciarLectura()
                 } else {
@@ -79,21 +78,25 @@ class ComunicacionTCP(private val context: Context) {
 
                     if (linea.startsWith("GAS:")) {
                         val datoCifrado = linea.substringAfter("GAS:").trim().toIntOrNull() ?: 0
-
-                        // Descifrado de datos (Paso 6)
                         val datoReal = descifrarDato(datoCifrado)
-
-                        // Actualizar UI y Firebase
                         withContext(Dispatchers.Main) {
                             mainActivity.actualizarUIyGuardar(datoReal)
                         }
                     }
-                    // Manejo de la Alerta de Humo enviada por el ESP32
+                    // --- MANEJO DE ALERTAS (CORREGIDO) ---
                     else if (linea.startsWith("ALERTA:HUMO")) {
                         withContext(Dispatchers.Main) {
-                            mainActivity.mostrarAlertaHumo()
+                            // Ahora usa la función correcta con el mensaje de alerta
+                            mainActivity.mostrarAlerta("🚨 ALARMA DE HUMO DETECTADA!")
                         }
                     }
+                    else if (linea.startsWith("ALERTA:RUIDO")) {
+                        withContext(Dispatchers.Main) {
+                            // Alerta para el nuevo sensor de sonido (si lo activas)
+                            mainActivity.mostrarAlerta("📢 RUIDO FUERTE DETECTADO!")
+                        }
+                    }
+                    // ------------------------------------
                 }
             } catch (e: Exception) {
                 handleDisconnection("Pérdida de comunicación: ${e.message}")
@@ -128,7 +131,6 @@ class ComunicacionTCP(private val context: Context) {
 
         scope.launch(Dispatchers.Main) {
             mainActivity.actualizarEstadoConexion("Estado: DESCONECTADO ($mensajeError)")
-            // Llamar a la rutina de offline para guardar datos localmente
             mainActivity.activarModoOffline()
         }
     }
